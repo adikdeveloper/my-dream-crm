@@ -1,0 +1,11 @@
+const express = require('express');
+const { getSubjects, createSubject, updateSubject, deleteSubject } = require('../controllers/subjectController');
+const { protect } = require('../middleware/auth');
+
+const router = express.Router();
+router.use(protect);
+
+router.route('/').get(getSubjects).post(createSubject);
+router.route('/:id').put(updateSubject).delete(deleteSubject);
+
+module.exports = router;
