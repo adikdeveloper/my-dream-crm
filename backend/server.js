@@ -8,11 +8,10 @@ const app = express();
 connectDB();
 
 app.use(cors({
-  origin: [
-    'http://localhost:3000',
-    'http://localhost:3001',
-    process.env.FRONTEND_URL || 'http://localhost:3000',
-  ],
+  origin: function (origin, callback) {
+    // Har qanday domendan kelgan so'rovga ruxsat berish (Vercel va h.k.)
+    callback(null, true);
+  },
   credentials: true,
 }));
 
