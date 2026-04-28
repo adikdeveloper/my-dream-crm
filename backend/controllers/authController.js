@@ -3,8 +3,10 @@ const { validationResult } = require('express-validator');
 const User = require('../models/User');
 
 const signToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN,
+  const secret = process.env.JWT_SECRET || 'fallback_secret_for_development_only';
+  const expires = process.env.JWT_EXPIRES_IN || '7d';
+  return jwt.sign({ id }, secret, {
+    expiresIn: expires,
   });
 };
 
@@ -43,6 +45,7 @@ exports.register = async (req, res) => {
     const user = await User.create({ firstName, lastName, phone, password });
     sendTokenResponse(user, 201, res);
   } catch (error) {
+    console.error('Register Error:', error);
     res.status(500).json({ success: false, message: 'Server xatosi', error: error.message });
   }
 };
@@ -70,6 +73,7 @@ exports.login = async (req, res) => {
 
     sendTokenResponse(user, 200, res);
   } catch (error) {
+    console.error('Login Error:', error);
     res.status(500).json({ success: false, message: 'Server xatosi', error: error.message });
   }
 };
