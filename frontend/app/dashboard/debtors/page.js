@@ -1,15 +1,10 @@
 'use client';
 
-import { useState, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, useEffect, useCallback } from 'react';
 import api from '../../../lib/api';
 
-const MONTHS_UZ = ['Yanvar','Fevral','Mart','Aprel','May','Iyun','Iyul','Avgust','Sentabr','Oktabr','Noyabr','Dekabr'];
-
-function currentMonthValue() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-}
+const MONTHS_UZ = ['Yanvar','Fevral','Mart','Aprel','May','Iyun',
+                   'Iyul','Avgust','Sentabr','Oktabr','Noyabr','Dekabr'];
 
 function monthLabel(val) {
   if (!val) return '';
@@ -17,28 +12,84 @@ function monthLabel(val) {
   return `${MONTHS_UZ[parseInt(m) - 1]} ${y}`;
 }
 
-// ── To'lov qo'shish tezkor modali ─────────────────────────────────────
-function QuickPayModal({ debtor, onClose, onPaid, groups }) {
-  const [payType, setPayType] = useState('cash');
-  const [amount, setAmount]   = useState(debtor.debt || '');
-  const [loading, setLoading] = useState(false);
+// min — qarzdor oylar soni filtri (0 = hammasi)
+const PERIODS = [
+  { value: 'all', label: 'Barchasi',       min: 0 },
+  { value: '1',   label: '1 oydan beri',   min: 1 },
+  { value: '3',   label: '3 oydan beri',   min: 3 },
+  { value: '6',   label: '6 oydan beri',   min: 6 },
+];
+
+// ── To'lov modali ─────────────────────────────────────────────────────
+function QuickPayModal({ debtor, onClose, onPaid }) {
+  const [checked, setChecked]  = useState({});   // { [month]: bool }
+  const [amounts, setAmounts]  = useState({});   // { [month]: number }
+  const [payType, setPayType]  = useState('cash');
+  const [loading, setLoading]  = useState(false);
+  const [errors, setErrors]    = useState({});
+
+  useEffect(() => {
+    const initChecked = {};
+    const initAmounts = {};
+    debtor.months.forEach((row) => {
+      initChecked[row.month] = true;
+      initAmounts[row.month] = row.debt;
+    });
+    setChecked(initChecked);
+    setAmounts(initAmounts);
+  }, [debtor]);
+
+  const toggleCheck = (month, debt) => {
+    setChecked((prev) => {
+      const next = { ...prev, [month]: !prev[month] };
+      // belgilansa — to'liq qarz; olib tashlansa — 0
+      setAmounts((a) => ({ ...a, [month]: next[month] ? debt : 0 }));
+      setErrors((e) => ({ ...e, [month]: '' }));
+      return next;
+    });
+  };
+
+  const setAmount = (month, val) => {
+    setAmounts((prev) => ({ ...prev, [month]: val }));
+    setErrors((prev) => ({ ...prev, [month]: '' }));
+  };
+
+  const totalEntered = debtor.months.reduce(
+    (s, row) => s + (checked[row.month] ? (Number(amounts[row.month]) || 0) : 0), 0
+  );
 
   const handlePay = async () => {
-    if (!amount) return;
+    const newErrors = {};
+    let hasAny = false;
+    debtor.months.forEach((row) => {
+      if (!checked[row.month]) return;
+      const v = Number(amounts[row.month]) || 0;
+      if (v <= 0) { newErrors[row.month] = 'Summa kiriting'; return; }
+      if (v > row.debt) { newErrors[row.month] = `Max: ${row.debt.toLocaleString('uz-UZ')}`; return; }
+      hasAny = true;
+    });
+    if (Object.keys(newErrors).length) { setErrors(newErrors); return; }
+    if (!hasAny) { setErrors({ _global: 'Kamida bitta oyni belgilang' }); return; }
+
     setLoading(true);
     try {
-      await api.post('/payments', {
-        student:     debtor._id,
-        group:       debtor.group._id,
-        amount:      Number(amount),
-        paymentType: payType,
-        month:       debtor.month,
-        paidAt:      new Date().toISOString().slice(0, 10),
-        status:      'paid',
-      });
+      await Promise.all(
+        debtor.months
+          .filter((row) => checked[row.month] && Number(amounts[row.month]) > 0)
+          .map((row) =>
+            api.post('/payments', {
+              student:     debtor._id,
+              group:       debtor.group._id,
+              amount:      Number(amounts[row.month]),
+              paymentType: payType,
+              month:       row.month,
+              paidAt:      new Date().toISOString().slice(0, 10),
+            })
+          )
+      );
       onPaid();
     } catch (err) {
-      alert(err.response?.data?.message || 'Xatolik');
+      setErrors({ _global: err.response?.data?.message || 'Xatolik yuz berdi' });
     } finally {
       setLoading(false);
     }
@@ -46,36 +97,111 @@ function QuickPayModal({ debtor, onClose, onPaid, groups }) {
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-box modal-box--sm" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-box modal-box--pay" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <h3>To'lov qabul qilish</h3>
-          <button className="modal-close" onClick={onClose}>✕</button>
+          <div>
+            <h3>To'lov qabul qilish</h3>
+            <p style={{ fontSize: 12, color: 'var(--gray-400)', marginTop: 2 }}>
+              {debtor.firstName} {debtor.lastName} · {debtor.group?.name}
+            </p>
+          </div>
+          <button className="modal-close" onClick={onClose} disabled={loading}>✕</button>
         </div>
-        <div className="modal-body">
+
+        <div className="modal-body" style={{ padding: '12px 20px' }}>
+
           {/* O'quvchi info */}
-          <div className="quick-pay-student">
+          <div className="quick-pay-student" style={{ marginBottom: 14 }}>
             <div className="td-avatar td-avatar--teal" style={{ width: 40, height: 40, fontSize: 14 }}>
               {debtor.firstName[0]}{debtor.lastName[0]}
             </div>
-            <div>
+            <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700, color: 'var(--navy)' }}>{debtor.firstName} {debtor.lastName}</div>
-              <div style={{ fontSize: 12, color: 'var(--gray-400)' }}>{debtor.group?.name}</div>
+              <div style={{ fontSize: 12, color: 'var(--gray-400)' }}>{debtor.phone}</div>
+            </div>
+            <div style={{ textAlign: 'right' }}>
+              <div style={{ fontSize: 11, color: 'var(--gray-400)' }}>Jami qarz</div>
+              <div style={{ fontSize: 15, fontWeight: 700, color: '#c0392b' }}>
+                {debtor.totalDebt.toLocaleString('uz-UZ')} so'm
+              </div>
             </div>
           </div>
 
-          {/* Summa */}
-          <div className="field" style={{ marginTop: 16 }}>
-            <label>Summa (so'm)</label>
-            <div className="salary-input-wrap">
-              <input type="number" value={amount} onChange={(e) => setAmount(e.target.value)}
-                min={0} placeholder="500 000"
-                style={{ width:'100%', padding:'11px 44px 11px 14px', border:'1.5px solid var(--gray-200)', borderRadius:8, fontSize:14, color:'var(--navy)', background:'var(--gray-50)', outline:'none' }} />
-              <span className="salary-suffix">so'm</span>
+          {/* Oylar jadvali */}
+          <div className="pay-months-list">
+            <div className="pay-months-header">
+              <span style={{ gridColumn: 'span 1' }}></span>
+              <span>Oy</span>
+              <span>Qarz</span>
+              <span>To'lov summasi</span>
             </div>
+            {debtor.months.map((row) => {
+              const isChecked = !!checked[row.month];
+              const v         = Number(amounts[row.month]) || 0;
+              const isPartial = isChecked && v > 0 && v < row.debt;
+              return (
+                <div
+                  key={row.month}
+                  className={`pay-month-row${!isChecked ? ' pay-month-row--off' : ''}`}
+                  onClick={() => toggleCheck(row.month, row.debt)}
+                >
+                  {/* Checkbox */}
+                  <div className="pay-month-check">
+                    <div className={`pay-checkbox${isChecked ? ' pay-checkbox--on' : ''}`}>
+                      {isChecked && (
+                        <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                          <polyline points="20 6 9 17 4 12"/>
+                        </svg>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Oy nomi */}
+                  <div className="pay-month-name">
+                    <span>{monthLabel(row.month)}</span>
+                    {row.isProRata && <span className="prorata-badge">Pro-rata</span>}
+                  </div>
+
+                  {/* Qarz */}
+                  <div style={{ fontSize: 13, color: isChecked ? '#c0392b' : 'var(--gray-400)', fontWeight: 600 }}>
+                    {row.debt.toLocaleString('uz-UZ')}
+                  </div>
+
+                  {/* Input */}
+                  <div className="pay-month-input-wrap" onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="number"
+                      className={`pay-month-input${errors[row.month] ? ' err' : ''}`}
+                      value={isChecked ? (amounts[row.month] ?? '') : ''}
+                      onChange={(e) => setAmount(row.month, e.target.value)}
+                      disabled={!isChecked}
+                      min={0}
+                      max={row.debt}
+                      placeholder="0"
+                    />
+                    {isPartial && <span className="pay-month-partial">qisman</span>}
+                    {errors[row.month] && <span className="field-err" style={{ fontSize: 10 }}>{errors[row.month]}</span>}
+                  </div>
+                </div>
+              );
+            })}
           </div>
+
+          {errors._global && (
+            <div style={{ color: '#c0392b', fontSize: 12, marginTop: 4, fontWeight: 600 }}>
+              {errors._global}
+            </div>
+          )}
+
+          {totalEntered > 0 && (
+            <div className="pay-total-row">
+              <span>Jami to'lov:</span>
+              <span>{totalEntered.toLocaleString('uz-UZ')} so'm</span>
+            </div>
+          )}
 
           {/* To'lov turi */}
-          <div className="field">
+          <div className="field" style={{ marginTop: 12, marginBottom: 0 }}>
             <label>To'lov turi</label>
             <div className="pay-type-row">
               {[['cash','💵 Naqd'],['card','💳 Karta'],['transfer',"🏦 O'tkazma"]].map(([val, lbl]) => (
@@ -88,10 +214,11 @@ function QuickPayModal({ debtor, onClose, onPaid, groups }) {
             </div>
           </div>
         </div>
+
         <div className="modal-footer">
-          <button className="btn-cancel" onClick={onClose}>Bekor qilish</button>
-          <button className="btn-save" onClick={handlePay} disabled={loading || !amount}>
-            {loading ? 'Saqlanmoqda...' : "✓ To'lovni tasdiqlash"}
+          <button className="btn-cancel" onClick={onClose} disabled={loading}>Bekor qilish</button>
+          <button className="btn-save" onClick={handlePay} disabled={loading || totalEntered === 0}>
+            {loading ? 'Saqlanmoqda…' : `✓ To'lash (${totalEntered.toLocaleString('uz-UZ')} so'm)`}
           </button>
         </div>
       </div>
@@ -101,26 +228,26 @@ function QuickPayModal({ debtor, onClose, onPaid, groups }) {
 
 // ── Main Page ──────────────────────────────────────────────────────────
 export default function DebtorsPage() {
-  const router = useRouter();
   const [debtors, setDebtors]         = useState([]);
   const [totalDebt, setTotalDebt]     = useState(0);
   const [loading, setLoading]         = useState(true);
-  const [filterMonth, setFilterMonth] = useState(currentMonthValue());
+  const [period, setPeriod]           = useState('all');
   const [filterGroup, setFilterGroup] = useState('');
   const [search, setSearch]           = useState('');
   const [groups, setGroups]           = useState([]);
   const [payTarget, setPayTarget]     = useState(null);
   const [toast, setToast]             = useState(null);
 
-  const showToast = (text, type = 'success') => {
+  const showToast = useCallback((text, type = 'success') => {
     setToast({ text, type });
-    setTimeout(() => setToast(null), 3000);
-  };
+    setTimeout(() => setToast(null), 3500);
+  }, []);
 
-  const fetchDebtors = async () => {
+  const fetchDebtors = useCallback(async () => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ month: filterMonth });
+      // Backend har doim barcha oylarni qaytaradi; filtrlash frontendda
+      const params = new URLSearchParams({ period: 'all' });
       if (filterGroup) params.append('group', filterGroup);
       const res = await api.get(`/debtors?${params}`);
       setDebtors(res.data.data);
@@ -130,15 +257,18 @@ export default function DebtorsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [filterGroup, showToast]);
 
   useEffect(() => {
     api.get('/groups').then((r) => setGroups(r.data.data));
   }, []);
 
-  useEffect(() => { fetchDebtors(); }, [filterMonth, filterGroup]);
+  useEffect(() => { fetchDebtors(); }, [fetchDebtors]);
+
+  const currentPeriod = PERIODS.find((p) => p.value === period) || PERIODS[0];
 
   const filtered = debtors.filter((d) => {
+    if (currentPeriod.min > 0 && d.months.length < currentPeriod.min) return false;
     const q = search.toLowerCase();
     return (
       d.firstName.toLowerCase().includes(q) ||
@@ -150,9 +280,11 @@ export default function DebtorsPage() {
 
   const handlePaid = () => {
     setPayTarget(null);
-    showToast("To'lov muvaffaqiyatli qabul qilindi! ✓");
+    showToast("To'lov muvaffaqiyatli qabul qilindi ✓");
     fetchDebtors();
   };
+
+  const periodLabel = currentPeriod.label;
 
   return (
     <div className="page-content">
@@ -161,7 +293,9 @@ export default function DebtorsPage() {
       <div className="page-header">
         <div>
           <h1 className="page-title">Qarzdorlar</h1>
-          <p className="page-subtitle">{monthLabel(filterMonth)} · {debtors.length} ta o'quvchi to'lovini kutmoqda</p>
+          <p className="page-subtitle">
+            {periodLabel} · {filtered.length} ta o'quvchi · Jami: {totalDebt.toLocaleString('uz-UZ')} so'm
+          </p>
         </div>
       </div>
 
@@ -186,23 +320,25 @@ export default function DebtorsPage() {
           </div>
           <div>
             <div className="debtor-stat-label">Umumiy qarz</div>
-            <div className="debtor-stat-value">{totalDebt.toLocaleString()} so'm</div>
+            <div className="debtor-stat-value">{totalDebt.toLocaleString('uz-UZ')} so'm</div>
           </div>
         </div>
         <div className="debtor-stat debtor-stat--blue">
           <div className="debtor-stat-icon">
             <svg width="22" height="22" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/>
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/>
+              <circle cx="9" cy="7" r="4"/>
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
             </svg>
           </div>
           <div>
-            <div className="debtor-stat-label">Hisob oyi</div>
-            <div className="debtor-stat-value" style={{ fontSize: 15 }}>{monthLabel(filterMonth)}</div>
+            <div className="debtor-stat-label">Oylar soni</div>
+            <div className="debtor-stat-value">{currentPeriod.min === 0 ? 'Barchasi' : `${currentPeriod.min}+`}</div>
           </div>
         </div>
       </div>
 
-      {/* Filterlar */}
+      {/* Period filter + qidiruv */}
       <div className="filter-bar">
         <div className="search-box">
           <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
@@ -212,14 +348,20 @@ export default function DebtorsPage() {
             value={search} onChange={(e) => setSearch(e.target.value)} />
         </div>
 
-        <input type="month" value={filterMonth}
-          onChange={(e) => setFilterMonth(e.target.value)}
-          className="filter-month" />
-
         <select className="filter-select" value={filterGroup}
           onChange={(e) => setFilterGroup(e.target.value)}>
           <option value="">Barcha guruhlar</option>
           {groups.map((g) => <option key={g._id} value={g._id}>{g.name}</option>)}
+        </select>
+
+        <select
+          className="filter-select"
+          value={period}
+          onChange={(e) => setPeriod(e.target.value)}
+        >
+          {PERIODS.map((p) => (
+            <option key={p.value} value={p.value}>{p.label}</option>
+          ))}
         </select>
       </div>
 
@@ -231,9 +373,7 @@ export default function DebtorsPage() {
           <div className="table-empty">
             <div className="table-empty-icon">🎉</div>
             <div className="table-empty-text">
-              {search || filterGroup
-                ? 'Natija topilmadi'
-                : `${monthLabel(filterMonth)} oyida barcha o'quvchilar to'lovni amalga oshirgan!`}
+              {search || filterGroup ? 'Natija topilmadi' : `${periodLabel} ichida hamma to'lovlar amalga oshirilgan!`}
             </div>
           </div>
         ) : (
@@ -242,10 +382,9 @@ export default function DebtorsPage() {
               <tr>
                 <th>#</th>
                 <th>O'quvchi</th>
-                <th>Telefon</th>
-                <th>Ota-ona tel.</th>
                 <th>Guruh</th>
-                <th>Qarz miqdori</th>
+                <th>Qarzdor oylar</th>
+                <th>Jami qarz</th>
                 <th>Amal</th>
               </tr>
             </thead>
@@ -258,20 +397,34 @@ export default function DebtorsPage() {
                       <div className="td-avatar td-avatar--red">
                         {d.firstName[0]}{d.lastName[0]}
                       </div>
-                      <span>{d.firstName} {d.lastName}</span>
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{d.firstName} {d.lastName}</div>
+                        <div style={{ fontSize: 11, color: 'var(--gray-400)', marginTop: 1 }}>{d.phone}</div>
+                      </div>
                     </div>
-                  </td>
-                  <td className="td-phone">{d.phone}</td>
-                  <td className="td-phone">
-                    {d.parentPhone && d.parentPhone !== '+998'
-                      ? d.parentPhone
-                      : <span className="td-empty">—</span>}
                   </td>
                   <td><span className="group-badge">{d.group?.name}</span></td>
                   <td>
-                    <span className="debt-amount">
-                      {d.debt ? `${Number(d.debt).toLocaleString()} so'm` : '—'}
-                    </span>
+                    <div className="debt-months-summary">
+                      <span className="debt-months-count">{d.months.length} ta oy</span>
+                      {d.months.length === 1 ? (
+                        <span className="debt-months-range">{monthLabel(d.months[0].month)}</span>
+                      ) : (
+                        <span className="debt-months-range">
+                          {monthLabel(d.months[0].month)} – {monthLabel(d.months[d.months.length - 1].month)}
+                        </span>
+                      )}
+                    </div>
+                  </td>
+                  <td>
+                    <div>
+                      <span className="debt-amount">{d.totalDebt.toLocaleString('uz-UZ')} so'm</span>
+                      {d.totalPaid > 0 && (
+                        <div style={{ fontSize: 11, color: '#276749', marginTop: 2 }}>
+                          To'langan: {d.totalPaid.toLocaleString('uz-UZ')}
+                        </div>
+                      )}
+                    </div>
                   </td>
                   <td>
                     <button className="btn-pay" onClick={() => setPayTarget(d)}>
@@ -293,7 +446,6 @@ export default function DebtorsPage() {
           debtor={payTarget}
           onClose={() => setPayTarget(null)}
           onPaid={handlePaid}
-          groups={groups}
         />
       )}
     </div>

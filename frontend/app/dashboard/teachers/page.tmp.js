@@ -190,7 +190,7 @@ function TeacherModal({ open, onClose, onSave, editData, groups, subjects }) {
   const router = useRouter();
   const [phoneDisplay, setPhoneDisplay] = useState('+998-');
   const [salaryType, setSalaryType] = useState('sum');
-  const { register, handleSubmit, setValue, reset, watch, formState: { errors } } = useForm();
+  const { register, handleSubmit, setValue, reset, formState: { errors } } = useForm();
 
   useEffect(() => {
     if (!open) return;
@@ -212,24 +212,7 @@ function TeacherModal({ open, onClose, onSave, editData, groups, subjects }) {
       setValue('phone', '');
       setSalaryType('sum');
     }
-  }, [editData, open, reset, setValue]);
-
-  const selectedSubject = watch('subject');
-  const selectedGroupId = watch('group');
-  const compatibleGroups = groups.filter((group) => {
-    const isCurrentGroup = selectedGroupId && group._id === selectedGroupId;
-    const sameSubject = !selectedSubject || group.subject === selectedSubject;
-    const isActiveGroup = group.status === 'active' || isCurrentGroup;
-    const assignedToOtherTeacher = group.teacher && group.teacher._id !== editData?._id;
-    return sameSubject && isActiveGroup && (!assignedToOtherTeacher || isCurrentGroup);
-  });
-
-  useEffect(() => {
-    if (!open || !selectedGroupId) return;
-    if (!compatibleGroups.some((group) => group._id === selectedGroupId)) {
-      setValue('group', '');
-    }
-  }, [compatibleGroups, open, selectedGroupId, setValue]);
+  }, [open, editData]);
 
   const handlePhoneInput = (e) => {
     const formatted = formatPhone(e.target.value);
@@ -246,7 +229,6 @@ function TeacherModal({ open, onClose, onSave, editData, groups, subjects }) {
   if (!open) return null;
 
   const hasGroups = groups.length > 0;
-  const hasCompatibleGroups = compatibleGroups.length > 0;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -355,16 +337,16 @@ function TeacherModal({ open, onClose, onSave, editData, groups, subjects }) {
             {/* Guruh */}
             <div className="field">
               <label>Guruh</label>
-              {hasCompatibleGroups ? (
+              {hasGroups ? (
                 <select {...register('group')}>
                   <option value="">— Guruh tanlang —</option>
-                  {compatibleGroups.map((group) => (
-                    <option key={group._id} value={group._id}>{group.name} ({group.subject})</option>
+                  {groups.map((g) => (
+                    <option key={g._id} value={g._id}>{g.name} ({g.subject})</option>
                   ))}
                 </select>
               ) : (
                 <div className="no-group-box">
-                  <span>{hasGroups ? "Tanlangan fan uchun mos bo'sh guruh yo'q" : "Hali guruh qo'shilmagan"}</span>
+                  <span>Hali guruh qo'shilmagan</span>
                   <button
                     type="button"
                     className="btn-goto-groups"
@@ -376,11 +358,6 @@ function TeacherModal({ open, onClose, onSave, editData, groups, subjects }) {
                     Guruh qo'shish
                   </button>
                 </div>
-              )}
-              {hasGroups && !hasCompatibleGroups && selectedSubject && (
-                <span className="field-err" style={{ display: 'inline-block', marginTop: 8 }}>
-                  Tanlangan fan uchun faqat boshqa o'qituvchiga biriktirilgan yoki nofaol guruhlar mavjud.
-                </span>
               )}
             </div>
           </div>
@@ -420,13 +397,16 @@ function DeleteModal({ name, onConfirm, onClose }) {
   );
 }
 
-// ── Main Page ─────────────────────────────────────────────────────────
 export default function TeachersPage() {
+  const currentMonth = currentMonthValue();
   const [teachers, setTeachers] = useState([]);
   const [groups, setGroups] = useState([]);
   const [subjects, setSubjects] = useState([]);
+  const [salaryRows, setSalaryRows] = useState([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('all');
+  const [subjectFilter, setSubjectFilter] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
   const [editData, setEditData] = useState(null);
   const [viewData, setViewData] = useState(null);
@@ -439,15 +419,23 @@ export default function TeachersPage() {
   };
 
   const fetchAll = async () => {
+    setLoading(true);
     try {
-      const [tRes, gRes, sRes] = await Promise.all([
+      const [teachersRes, groupsRes, subjectsRes, salaryRes] = await Promise.allSettled([
         api.get('/teachers'),
         api.get('/groups'),
         api.get('/subjects'),
+        api.get('/payments/teacher-salary'),
       ]);
-      setTeachers(tRes.data.data);
-      setGroups(gRes.data.data);
-      setSubjects(sRes.data.data.filter((s) => s.status === 'active'));
+
+      if (teachersRes.status !== 'fulfilled' || groupsRes.status !== 'fulfilled' || subjectsRes.status !== 'fulfilled') {
+        throw new Error("Ma'lumotlarni yuklashda xatolik");
+      }
+
+      setTeachers(teachersRes.value.data.data);
+      setGroups(groupsRes.value.data.data);
+      setSubjects(subjectsRes.value.data.data.filter((item) => item.status === 'active'));
+      setSalaryRows(salaryRes.status === 'fulfilled' ? salaryRes.value.data.data : []);
     } catch {
       showToast("Ma'lumotlarni yuklashda xatolik", 'error');
     } finally {
@@ -455,7 +443,9 @@ export default function TeachersPage() {
     }
   };
 
-  useEffect(() => { fetchAll(); }, []);
+  useEffect(() => {
+    fetchAll();
+  }, []);
 
   const handleSave = async (data) => {
     try {
@@ -480,188 +470,341 @@ export default function TeachersPage() {
       showToast("O'qituvchi o'chirildi");
       setDeleteTarget(null);
       fetchAll();
-    } catch (err) {
-      showToast(err.response?.data?.message || "O'chirishda xatolik", 'error');
+    } catch {
+      showToast("O'chirishda xatolik", 'error');
     }
   };
 
-  const openAdd = () => { setEditData(null); setModalOpen(true); };
-  const openEdit = (t) => { setEditData(t); setModalOpen(true); };
+  const openAdd = () => {
+    setEditData(null);
+    setModalOpen(true);
+  };
 
-  const filtered = teachers.filter((t) => {
-    const q = search.toLowerCase();
-    return (
-      t.firstName.toLowerCase().includes(q) ||
-      t.lastName.toLowerCase().includes(q) ||
-      t.subject.toLowerCase().includes(q) ||
-      t.phone.includes(q)
-    );
+  const openEdit = (teacher) => {
+    setEditData(teacher);
+    setModalOpen(true);
+  };
+
+  const salaryMap = {};
+  salaryRows.forEach((row) => {
+    const monthData = row.monthlyBreakdown?.find((item) => item.month === currentMonth) || {
+      studentPayments: 0,
+      shouldReceive: 0,
+    };
+    const alreadyPaid = row.paymentHistory
+      ?.filter((payment) => payment.month === currentMonth)
+      .reduce((sum, payment) => sum + payment.amount, 0) || 0;
+
+    salaryMap[row._id] = {
+      totalStudentPayments: monthData.studentPayments || 0,
+      shouldReceive: monthData.shouldReceive || 0,
+      alreadyPaid,
+      balance: Math.max(0, (monthData.shouldReceive || 0) - alreadyPaid),
+    };
   });
 
-  const salaryLabel = (t) =>
-    t.salaryType === 'percent'
-      ? `${t.salary}%`
-      : `${Number(t.salary).toLocaleString()} so'm`;
+  const allSubjectOptions = Array.from(new Set(subjects.map((item) => item.name))).sort((left, right) => left.localeCompare(right));
+
+  const filtered = [...teachers]
+    .filter((teacher) => {
+      const query = search.toLowerCase().trim();
+      const matchesSearch = !query || (
+        teacher.firstName.toLowerCase().includes(query)
+        || teacher.lastName.toLowerCase().includes(query)
+        || teacher.subject.toLowerCase().includes(query)
+        || teacher.phone.includes(query)
+        || (teacher.group?.name || '').toLowerCase().includes(query)
+      );
+      const matchesStatus = statusFilter === 'all' || teacher.status === statusFilter;
+      const matchesSubject = !subjectFilter || teacher.subject === subjectFilter;
+      return matchesSearch && matchesStatus && matchesSubject;
+    })
+    .sort((left, right) => {
+      if (left.status !== right.status) return left.status === 'active' ? -1 : 1;
+      return `${left.firstName} ${left.lastName}`.localeCompare(`${right.firstName} ${right.lastName}`);
+    });
+
+  const activeTeachers = teachers.filter((teacher) => teacher.status === 'active');
+  const inactiveTeachers = teachers.filter((teacher) => teacher.status === 'inactive');
+  const assignedTeachers = teachers.filter((teacher) => teacher.group).length;
+  const percentTeachers = teachers.filter((teacher) => teacher.salaryType === 'percent').length;
+  const fixedTeachers = teachers.filter((teacher) => teacher.salaryType === 'sum').length;
+  const uniqueSubjects = Array.from(new Set(teachers.map((teacher) => teacher.subject).filter(Boolean)));
+
+  const payrollTotals = teachers.reduce((accumulator, teacher) => {
+    const snapshot = salaryMap[teacher._id] || {
+      totalStudentPayments: 0,
+      shouldReceive: 0,
+      alreadyPaid: 0,
+      balance: 0,
+    };
+
+    return {
+      shouldReceive: accumulator.shouldReceive + snapshot.shouldReceive,
+      alreadyPaid: accumulator.alreadyPaid + snapshot.alreadyPaid,
+      balance: accumulator.balance + snapshot.balance,
+    };
+  }, {
+    shouldReceive: 0,
+    alreadyPaid: 0,
+    balance: 0,
+  });
+
+  const assignmentRate = activeTeachers.length ? Math.round((assignedTeachers / activeTeachers.length) * 100) : 0;
+  const topSubjects = Object.entries(
+    teachers.reduce((accumulator, teacher) => {
+      accumulator[teacher.subject] = (accumulator[teacher.subject] || 0) + 1;
+      return accumulator;
+    }, {})
+  ).sort((left, right) => right[1] - left[1]).slice(0, 4);
+
+  const statusButtons = [
+    { value: 'all', label: 'Barchasi' },
+    { value: 'active', label: 'Faol' },
+    { value: 'inactive', label: 'Nofaol' },
+  ];
+
+  const salaryLabel = (teacher) => (
+    teacher.salaryType === 'percent'
+      ? `${teacher.salary}%`
+      : `${fmt(teacher.salary)} so'm`
+  );
 
   return (
-    <div className="page-content">
-      {toast && <div className={`toast toast--${toast.type}`}>{toast.text}</div>}
+    <div className="page-content teachers-page">
+      {toast ? <div className={`toast toast--${toast.type}`}>{toast.text}</div> : null}
 
-      <div className="page-header">
-        <div>
-          <h1 className="page-title">O'qituvchilar</h1>
-          <p className="page-subtitle">Jami: {teachers.length} ta o'qituvchi</p>
+      <section className="teachers-hero">
+        <div className="teachers-hero-main">
+          <div className="teachers-hero-kicker">Akademik jamoa</div>
+          <h1 className="teachers-hero-title">O'qituvchilar bo'limi</h1>
+          <p className="teachers-hero-copy">
+            Jamoani boshqarish, maosh holatini kuzatish va guruhlar bo'yicha yuklamani bir joydan nazorat qilish uchun yangilangan ko'rinish.
+          </p>
+
+          <div className="teachers-hero-actions">
+            <button className="btn-add teachers-btn-add" onClick={openAdd}>
+              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                <line x1="12" y1="5" x2="12" y2="19" />
+                <line x1="5" y1="12" x2="19" y2="12" />
+              </svg>
+              Yangi o'qituvchi
+            </button>
+            <Link href="/dashboard/payments" className="teachers-ghost-btn">
+              Maoshlar bo'limi
+            </Link>
+          </div>
+
+          <div className="teachers-hero-strip">
+            <div className="teachers-hero-strip-item">
+              <span>Faol jamoa</span>
+              <strong>{activeTeachers.length} ta</strong>
+            </div>
+            <div className="teachers-hero-strip-item">
+              <span>Biriktirilgan guruhlar</span>
+              <strong>{assignedTeachers} ta</strong>
+            </div>
+            <div className="teachers-hero-strip-item">
+              <span>{monthLabel(currentMonth)}</span>
+              <strong>{fmt(payrollTotals.balance)} so'm qoldiq</strong>
+            </div>
+          </div>
         </div>
-        <button className="btn-add" onClick={openAdd}>
-          <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-            <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-          Qo'shish
-        </button>
-      </div>
 
-      <div className="table-toolbar">
-        <div className="search-box">
-          <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-            <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
-          </svg>
-          <input
-            type="text"
-            placeholder="Ism, fan yoki telefon bo'yicha..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-          />
+        <div className="teachers-hero-side">
+          <div className="teachers-payroll-box">
+            <div className="teachers-panel-kicker">Joriy oy maoshi</div>
+            <div className="teachers-payroll-amount">{fmt(payrollTotals.shouldReceive)} so'm</div>
+            <div className="teachers-payroll-meta">To'langan: {fmt(payrollTotals.alreadyPaid)} so'm</div>
+            <div className="teachers-payroll-track">
+              <div
+                className="teachers-payroll-fill"
+                style={{ width: `${payrollTotals.shouldReceive ? Math.min(100, Math.round((payrollTotals.alreadyPaid / payrollTotals.shouldReceive) * 100)) : 0}%` }}
+              />
+            </div>
+            <div className="teachers-payroll-foot">
+              <span>Qoldiq</span>
+              <strong>{fmt(payrollTotals.balance)} so'm</strong>
+            </div>
+          </div>
+
+          <div className="teachers-subject-box">
+            <div className="teachers-panel-kicker">Top yo'nalishlar</div>
+            {topSubjects.length === 0 ? (
+              <div className="teachers-subject-empty">Hali fanlar bo'yicha ma'lumot yo'q</div>
+            ) : (
+              <div className="teachers-subject-list">
+                {topSubjects.map(([subject, count]) => (
+                  <div key={subject} className="teachers-subject-row">
+                    <span>{subject}</span>
+                    <strong>{count} ta</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
-      </div>
+      </section>
 
-      <div className="table-card">
+      <section className="teachers-stat-grid">
+        <article className="teacher-stat-card teacher-stat-card--blue">
+          <div className="teacher-stat-icon teacher-stat-icon--blue">
+            <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+              <circle cx="9" cy="7" r="4" />
+              <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+              <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+            </svg>
+          </div>
+          <div className="teacher-stat-label">Jami o'qituvchilar</div>
+          <div className="teacher-stat-value">{teachers.length} ta</div>
+          <p className="teacher-stat-meta">{activeTeachers.length} ta faol, {inactiveTeachers.length} ta nofaol</p>
+        </article>
+
+        <article className="teacher-stat-card teacher-stat-card--emerald">
+          <div className="teacher-stat-icon teacher-stat-icon--emerald">
+            <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <rect x="2" y="3" width="20" height="18" rx="2" />
+              <path d="M3 7h18M3 12h18M3 17h18" />
+            </svg>
+          </div>
+          <div className="teacher-stat-label">Guruh qamrovi</div>
+          <div className="teacher-stat-value">{assignmentRate}%</div>
+          <p className="teacher-stat-meta">{assignedTeachers} ta o'qituvchi guruhga biriktirilgan</p>
+        </article>
+        <article className="teacher-stat-card teacher-stat-card--amber">
+          <div className="teacher-stat-icon teacher-stat-icon--amber">
+            <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <line x1="12" y1="1" x2="12" y2="23" />
+              <path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" />
+            </svg>
+          </div>
+          <div className="teacher-stat-label">Maosh modeli</div>
+          <div className="teacher-stat-value">{percentTeachers} / {fixedTeachers}</div>
+          <p className="teacher-stat-meta">Foizli va belgilangan maosh modeli nisbatlari</p>
+        </article>
+
+        <article className="teacher-stat-card teacher-stat-card--violet">
+          <div className="teacher-stat-icon teacher-stat-icon--violet">
+            <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+            </svg>
+          </div>
+          <div className="teacher-stat-label">Fanlar qamrovi</div>
+          <div className="teacher-stat-value">{uniqueSubjects.length} ta</div>
+          <p className="teacher-stat-meta">Jamoa qamrab olgan faol yo'nalishlar soni</p>
+        </article>
+      </section>
+
+      <section className="teachers-toolbar-card">
+        <div className="teachers-toolbar-head">
+          <div>
+            <h2 className="teachers-section-title">Jamoa rosteri</h2>
+            <p className="teachers-section-subtitle">{filtered.length} ta natija ko'rsatilmoqda</p>
+          </div>
+
+          <select className="filter-select teachers-filter-select" value={subjectFilter} onChange={(event) => setSubjectFilter(event.target.value)}>
+            <option value="">Barcha fanlar</option>
+            {allSubjectOptions.map((subject) => (
+              <option key={subject} value={subject}>{subject}</option>
+            ))}
+          </select>
+        </div>
+
+        <div className="teachers-filter-row">
+          <div className="search-box teachers-search-box">
+            <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="8" />
+              <path d="m21 21-4.35-4.35" />
+            </svg>
+            <input
+              type="text"
+              placeholder="Ism, fan, guruh yoki telefon bo'yicha qidiring..."
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+            />
+          </div>
+
+          <div className="teachers-status-tabs">
+            {statusButtons.map((item) => (
+              <button
+                key={item.value}
+                type="button"
+                className={`teachers-status-tab${statusFilter === item.value ? ' teachers-status-tab--active' : ''}`}
+                onClick={() => setStatusFilter(item.value)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      <section className="teachers-roster-card">
         {loading ? (
           <div className="table-empty">
             <div className="loading-spinner" style={{ margin: '0 auto' }} />
           </div>
         ) : filtered.length === 0 ? (
-          <div className="table-empty">
-            <div className="table-empty-icon">👨‍🏫</div>
-            <div className="table-empty-text">
-              {search ? "Qidiruv bo'yicha natija topilmadi" : "Hali o'qituvchi qo'shilmagan"}
+          <div className="teachers-empty-state">
+            <div className="teachers-empty-icon">
+              <svg width="26" height="26" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+                <circle cx="9" cy="7" r="4" />
+                <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+                <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+              </svg>
             </div>
+            <h3>Natija topilmadi</h3>
+            <p>{search || subjectFilter || statusFilter !== 'all' ? "Filtrlarni o'zgartirib qayta urinib ko'ring" : "Hali o'qituvchi qo'shilmagan"}</p>
           </div>
         ) : (
-          <>
-            {/* Desktop View */}
-            <table className="data-table desktop-only">
-              <thead>
-                <tr>
-                  <th>#</th>
-                  <th>Ism Familiya</th>
-                  <th>Telefon</th>
-                  <th>Fan</th>
-                  <th>Guruh</th>
-                  <th>Maosh</th>
-                  <th>Status</th>
-                  <th>Harakatlar</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filtered.map((t, i) => (
-                  <tr key={t._id}>
-                    <td className="td-num">{i + 1}</td>
-                    <td>
-                      <div className="td-user">
-                        <div className="td-avatar">{t.firstName[0]}{t.lastName[0]}</div>
-                        <span>{t.firstName} {t.lastName}</span>
-                      </div>
-                    </td>
-                    <td className="td-phone">{t.phone}</td>
-                    <td>{t.subject}</td>
-                    <td>
-                      {t.group
-                        ? <span className="group-badge">{t.group.name}</span>
-                        : <span className="td-empty">—</span>}
-                    </td>
-                    <td className="td-salary">{salaryLabel(t)}</td>
-                    <td>
-                      <span className={`status-badge status-badge--${t.status}`}>
-                        {t.status === 'active' ? 'Faol' : 'Nofaol'}
-                      </span>
-                    </td>
-                    <td>
-                      <div className="td-actions">
-                        <button className="btn-icon btn-icon--view" onClick={() => setViewData(t)} title="Ko'rish">
-                          <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
-                            <circle cx="12" cy="12" r="3" />
-                          </svg>
-                        </button>
-                        <button className="btn-icon btn-icon--edit" onClick={() => openEdit(t)} title="Tahrirlash">
-                          <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                            <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
-                          </svg>
-                        </button>
-                        <button className="btn-icon btn-icon--delete" onClick={() => setDeleteTarget(t)} title="O'chirish">
-                          <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                            <polyline points="3 6 5 6 21 6" />
-                            <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
-                            <path d="M10 11v6M14 11v6" />
-                            <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
-                          </svg>
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          <div className="teachers-grid">
+            {filtered.map((teacher) => {
+              const snapshot = salaryMap[teacher._id] || {
+                totalStudentPayments: 0,
+                shouldReceive: 0,
+                alreadyPaid: 0,
+                balance: 0,
+              };
+              const progress = snapshot.shouldReceive
+                ? Math.min(100, Math.round((snapshot.alreadyPaid / snapshot.shouldReceive) * 100))
+                : 0;
 
-            {/* Mobile View */}
-            <div className="teachers-grid mobile-only">
-              {filtered.map((t) => (
-                <div key={t._id} className="teacher-card">
-                  <div className="teacher-card-header">
-                    <div className="teacher-card-avatar">{t.firstName[0]}{t.lastName[0]}</div>
-                    <div className="teacher-card-info">
-                      <div className="teacher-card-name">{t.firstName} {t.lastName}</div>
-                      <div className="teacher-card-subject">{t.subject}</div>
-                    </div>
-                    <span className={`status-badge status-badge--${t.status}`}>
-                      {t.status === 'active' ? 'Faol' : 'Nofaol'}
-                    </span>
-                  </div>
-                  
-                  <div className="teacher-card-body">
-                    <div>
-                      <div className="teacher-card-item-label">Telefon</div>
-                      <div className="teacher-card-item-value">{t.phone}</div>
-                    </div>
-                    <div>
-                      <div className="teacher-card-item-label">Guruh</div>
-                      <div className="teacher-card-item-value">
-                        {t.group ? t.group.name : <span className="td-empty">—</span>}
+              return (
+                <article key={teacher._id} className={`teacher-profile-card${teacher.status === 'inactive' ? ' teacher-profile-card--muted' : ''}`}>
+                  <div className="teacher-card-head">
+                    <div className="teacher-card-person">
+                      <div className={`teacher-card-avatar teacher-card-avatar--${teacher.status}`}>
+                        {teacher.firstName[0]}{teacher.lastName[0]}
+                      </div>
+                      <div>
+                        <div className="teacher-card-name">{teacher.firstName} {teacher.lastName}</div>
+                        <div className="teacher-card-badges">
+                          <span className="teacher-subject-pill">{teacher.subject}</span>
+                          <span className={`status-badge status-badge--${teacher.status}`}>
+                            {teacher.status === 'active' ? 'Faol' : 'Nofaol'}
+                          </span>
+                        </div>
                       </div>
                     </div>
-                    <div>
-                      <div className="teacher-card-item-label">Maosh</div>
-                      <div className="teacher-card-item-value">{salaryLabel(t)}</div>
-                    </div>
-                  </div>
 
-                  <div className="teacher-card-footer">
-                    <div className="teacher-card-actions">
-                      <button className="btn-icon btn-icon--view" onClick={() => setViewData(t)}>
-                        <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                    <div className="td-actions teacher-card-actions">
+                      <button className="btn-icon btn-icon--view" onClick={() => setViewData(teacher)} title="Ko'rish">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                           <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
                           <circle cx="12" cy="12" r="3" />
                         </svg>
                       </button>
-                      <button className="btn-icon btn-icon--edit" onClick={() => openEdit(t)}>
-                        <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <button className="btn-icon btn-icon--edit" onClick={() => openEdit(teacher)} title="Tahrirlash">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                           <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
                           <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                         </svg>
                       </button>
-                      <button className="btn-icon btn-icon--delete" onClick={() => setDeleteTarget(t)}>
-                        <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                      <button className="btn-icon btn-icon--delete" onClick={() => setDeleteTarget(teacher)} title="O'chirish">
+                        <svg width="15" height="15" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                           <polyline points="3 6 5 6 21 6" />
                           <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
                           <path d="M10 11v6M14 11v6" />
@@ -669,42 +812,23 @@ export default function TeachersPage() {
                         </svg>
                       </button>
                     </div>
-                    <button className="btn-pay" onClick={() => setViewData(t)} style={{ padding: '6px 12px', fontSize: '12px' }}>
-                      Batafsil
-                    </button>
                   </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
 
-      {viewData && (
-        <TeacherViewModal
-          teacher={viewData}
-          onClose={() => setViewData(null)}
-          onEdit={(t) => { setEditData(t); setModalOpen(true); }}
-        />
-      )}
-      <TeacherModal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        onSave={handleSave}
-        editData={editData}
-        groups={groups}
-        subjects={subjects}
-      />
-      {deleteTarget && (
-        <DeleteModal
-          name={`${deleteTarget.firstName} ${deleteTarget.lastName}`}
-          onConfirm={handleDelete}
-          onClose={() => setDeleteTarget(null)}
-        />
-      )}
-    </div>
-  );
-}
-
-
-
+                  <div className="teacher-card-grid">
+                    <div className="teacher-card-info">
+                      <span>Telefon</span>
+                      <strong>{teacher.phone}</strong>
+                    </div>
+                    <div className="teacher-card-info">
+                      <span>Guruh</span>
+                      <strong>{teacher.group?.name || 'Biriktirilmagan'}</strong>
+                    </div>
+                    <div className="teacher-card-info">
+                      <span>Maosh</span>
+                      <strong>{salaryLabel(teacher)}</strong>
+                    </div>
+                    <div className="teacher-card-info">
+                      <span>Turi</span>
+                      <strong>{teacher.salaryType === 'percent' ? 'Foizli' : 'Belgilangan'}</strong>
+                    </div>
+                  </div>
